@@ -9,33 +9,46 @@ import (
 	"net/http"
 	"strings"
 
-	"dyndns/ipparser"
+	"github.com/dprandzioch/docker-ddns/rest-api/ipparser"
 )
 
-type RequestDataExtractor struct {
-	Address func(request *http.Request) string
-	Secret  func(request *http.Request) string
-	Domain  func(request *http.Request) string
+type WebserviceResponse struct {
+	Success   bool
+	Message   string
+	Domain    string
+	Domains   []string
+	Address   string
+	AddrType  string
+	Addresses []Address
 }
 
-type WebserviceResponse struct {
-	Success  bool
-	Message  string
-	Domain   string
-	Domains  []string
+type Address struct {
 	Address  string
 	AddrType string
 }
 
-func BuildWebserviceResponseFromRequest(r *http.Request, appConfig *Config, extractors RequestDataExtractor) WebserviceResponse {
+func ParseAddress(address string) (Address, error) {
+	if ipparser.ValidIP4(address) {
+		return Address{Address: address, AddrType: "A"}, nil
+	} else if ipparser.ValidIP6(address) {
+		return Address{Address: address, AddrType: "AAAA"}, nil
+	}
+	return Address{}, fmt.Errorf("Invalid ip address: %s", address)
+}
+
+func BuildWebserviceResponseFromRequest(r *http.Request, appConfig *Config, extractors requestDataExtractor) WebserviceResponse {
 	response := WebserviceResponse{}
 
-	sharedSecret := extractors.Secret(r)
 	response.Domains = strings.Split(extractors.Domain(r), ",")
-	response.Address = extractors.Address(r)
+	for _, address := range strings.Split(extractors.Address(r), ",") {
+		var parsedAddress, error = ParseAddress(address)
+		if error == nil {
+			response.Addresses = append(response.Addresses, parsedAddress)
+		}
+	}
 
-	if sharedSecret != appConfig.SharedSecret {
-		log.Println(fmt.Sprintf("Invalid shared secret: %s", sharedSecret))
+	if extractors.Secret(r) == "" { // futher checking is done by bind server as configured
+		log.Println(fmt.Sprintf("Invalid shared secret"))
 		response.Success = false
 		response.Message = "Invalid Credentials"
 		return response
@@ -50,43 +63,31 @@ func BuildWebserviceResponseFromRequest(r *http.Request, appConfig *Config, extr
 		}
 	}
 
-	// kept in the response for compatibility reasons
-	response.Domain = strings.Join(response.Domains, ",")
-
-	if ipparser.ValidIP4(response.Address) {
-		response.AddrType = "A"
-	} else if ipparser.ValidIP6(response.Address) {
-		response.AddrType = "AAAA"
-	} else {
-		var ip string
-		var err error
-
-		ip, err = getUserIP(r)
+	if len(response.Addresses) == 0 {
+		ip, err := getUserIP(r)
 		if ip == "" {
 			ip, _, err = net.SplitHostPort(r.RemoteAddr)
 		}
 
-		if err != nil {
-			response.Success = false
-			response.Message = fmt.Sprintf("%q is neither a valid IPv4 nor IPv6 address", r.RemoteAddr)
-			log.Println(fmt.Sprintf("Invalid address: %q", r.RemoteAddr))
-			return response
+		if err == nil {
+			parsedAddress, err := ParseAddress(ip)
+			if err == nil {
+				response.Addresses = append(response.Addresses, parsedAddress)
+			}
 		}
-
-		// @todo refactor this code to remove duplication
-		if ipparser.ValidIP4(ip) {
-			response.AddrType = "A"
-		} else if ipparser.ValidIP6(ip) {
-			response.AddrType = "AAAA"
-		} else {
-			response.Success = false
-			response.Message = fmt.Sprintf("%s is neither a valid IPv4 nor IPv6 address", response.Address)
-			log.Println(fmt.Sprintf("Invalid address: %s", response.Address))
-			return response
-		}
-
-		response.Address = ip
 	}
+
+	if len(response.Addresses) == 0 {
+		response.Success = false
+		response.Message = fmt.Sprintf("%v is neither a valid IPv4 nor IPv6 address", extractors.Address(r))
+		log.Println(fmt.Sprintf("Invalid address: %v", extractors.Address(r)))
+		return response
+	}
+
+	// kept in the response for compatibility reasons
+	response.Domain = strings.Join(response.Domains, ",")
+	response.Address = response.Addresses[0].Address
+	response.AddrType = response.Addresses[0].AddrType
 
 	response.Success = true
 
@@ -128,27 +129,27 @@ func inRange(r ipRange, ipAddress net.IP) bool {
 }
 
 var privateRanges = []ipRange{
-	ipRange{
+	{
 		start: net.ParseIP("10.0.0.0"),
 		end:   net.ParseIP("10.255.255.255"),
 	},
-	ipRange{
+	{
 		start: net.ParseIP("100.64.0.0"),
 		end:   net.ParseIP("100.127.255.255"),
 	},
-	ipRange{
+	{
 		start: net.ParseIP("172.16.0.0"),
 		end:   net.ParseIP("172.31.255.255"),
 	},
-	ipRange{
+	{
 		start: net.ParseIP("192.0.0.0"),
 		end:   net.ParseIP("192.0.0.255"),
 	},
-	ipRange{
+	{
 		start: net.ParseIP("192.168.0.0"),
 		end:   net.ParseIP("192.168.255.255"),
 	},
-	ipRange{
+	{
 		start: net.ParseIP("198.18.0.0"),
 		end:   net.ParseIP("198.19.255.255"),
 	},
@@ -168,4 +169,3 @@ func isPrivateSubnet(ipAddress net.IP) bool {
 	}
 	return false
 }
-
